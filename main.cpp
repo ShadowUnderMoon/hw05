@@ -10,7 +10,7 @@
 #include <mutex>
 #include <chrono>
 #include <string>
-
+#include <shared_mutex>
 
 struct User {
     std::string password;
@@ -22,7 +22,7 @@ class HTTPServer {
 private:
     std::map<std::string, User> users;
     std::map<std::string, std::chrono::time_point<std::chrono::steady_clock> > has_login;  // 换成 std::chrono::seconds 之类的
-    std::mutex mtx;
+    std::shared_mutex mtx;
 
 public:
 // 作业要求1：把这些函数变成多线程安全的
@@ -54,7 +54,7 @@ public:
     }
 
     std::string do_queryuser(std::string username) {
-        std::unique_lock  lock(mtx);
+        std::shared_lock  lock(mtx);
         if (users.find(username) == users.end()) {
             return "unknown";
         }
