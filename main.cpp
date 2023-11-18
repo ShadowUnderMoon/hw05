@@ -1,6 +1,8 @@
 // 小彭老师作业05：假装是多线程 HTTP 服务器 - 富连网大厂面试官觉得很赞
+#include <condition_variable>
 #include <functional>
 #include <iostream>
+#include <queue>
 #include <sstream>
 #include <cstdlib>
 #include <string>
@@ -22,13 +24,14 @@ class HTTPServer {
 private:
     std::map<std::string, User> users;
     std::map<std::string, std::chrono::time_point<std::chrono::steady_clock> > has_login;  // 换成 std::chrono::seconds 之类的
-    std::shared_mutex mtx;
+    std::shared_mutex users_mtx;
+    std::mutex login_mtx;
 
 public:
 // 作业要求1：把这些函数变成多线程安全的
 // 提示：能正确利用 shared_mutex 加分，用 lock_guard 系列加分
     std::string do_register(std::string username, std::string password, std::string school, std::string phone) {
-        std::unique_lock lock(mtx);
+        std::unique_lock lock(users_mtx);
         User user = {password, school, phone};
         if (users.emplace(username, user).second)
             return "注册成功";
@@ -37,24 +40,30 @@ public:
     }
 
     std::string do_login(std::string username, std::string password) {
-        // 作业要求2：把这个登录计时器改成基于 chrono 的
-        std::unique_lock lock(mtx);
-        auto now = std::chrono::steady_clock::now();
-        if (has_login.find(username) != has_login.end()) {
-            auto sec = now - has_login.at(username);  // C 语言算时间差
-            return std::to_string(std::chrono::duration_cast<std::chrono::seconds>(sec).count()) + "秒内登录过";
+        {
+            // 作业要求2：把这个登录计时器改成基于 chrono 的
+            std::unique_lock lock(login_mtx);
+            auto now = std::chrono::steady_clock::now();
+            if (has_login.find(username) != has_login.end()) {
+                auto sec = now - has_login.at(username);  // C 语言算时间差
+                return std::to_string(std::chrono::duration_cast<std::chrono::seconds>(sec).count()) + "秒内登录过";
+            }
+            has_login[username] = now;
         }
-        has_login[username] = now;
 
-        if (users.find(username) == users.end())
-            return "用户名错误";
-        if (users.at(username).password != password)
-            return "密码错误";
+
+        {
+            std::shared_lock lock(users_mtx);
+            if (users.find(username) == users.end())
+                return "用户名错误";
+            if (users.at(username).password != password)
+                return "密码错误";
+        }
         return "登录成功";
     }
 
     std::string do_queryuser(std::string username) {
-        std::shared_lock  lock(mtx);
+        std::shared_lock  lock(users_mtx);
         if (users.find(username) == users.end()) {
             return "unknown";
         }
@@ -73,29 +82,52 @@ HTTPServer http_server;
 struct ThreadPool {
 private:
     std::vector<std::thread> m_pool;
+    std::queue<std::function<void()>> tasks;
     std::mutex mtx;
+    std::condition_variable cv;
+    bool stop;
 public:
+
+
+    ThreadPool(size_t thread_nums) : stop(false) {
+        for (int i = 0; i < thread_nums; i++) {
+            m_pool.emplace_back([this] {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock lck(mtx);
+                        cv.wait(lck, [this] { return stop || !tasks.empty(); });
+                        if (stop && tasks.empty()) return;
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+
+                    task();
+                }
+            });
+        }
+    }
     void create(std::function<void()> start) {
         // 作业要求3：如何让这个线程保持在后台执行不要退出？
         // 提示：改成 async 和 future 且用法正确也可以加分
-        std::unique_lock<std::mutex> lock;
-        if (m_pool.size() >= 4) {
-            for (auto& thr: m_pool) {
-                thr.join();
-            }
-            m_pool.clear();
-        }
-        m_pool.push_back(std::move(std::thread(start)));
+        std::unique_lock lck(mtx);
+        tasks.push(start);
+        cv.notify_one();
     }
 
     ~ThreadPool() {
+
+        std::unique_lock lck(mtx);
+        stop = true;
+        cv.notify_all();
+        lck.unlock();
         for (auto& thr : m_pool) {
             thr.join();
         }
     }
 };
 
-ThreadPool tpool;
+ThreadPool tpool(4);
 
 
 namespace test {  // 测试用例？出水用力！
